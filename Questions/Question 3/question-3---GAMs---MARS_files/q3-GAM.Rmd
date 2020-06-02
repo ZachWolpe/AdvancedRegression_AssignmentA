@@ -1,0 +1,1071 @@
+---
+title: "Question 3: GAMs & MARS"
+output: html_document
+---
+
+
+# Advanced Regression Assignment A
+
+##### Zach Wolpe                                 
+##### WLPZAC001
+_01 June 2020_
+
+------------------
+
+
+```{r setup, include=FALSE, warning=F, error=F}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(splines)
+library(tidyverse)
+library(psych)
+library(earth)
+library(mgcv)
+```
+
+
+
+## Exploratory Data Analysis
+
+We with to examine the relationship between the quality of red wine & the various factors that contribute to its production. First, lets familiarize ourselves with the data by examining the distributions of & correlations between variables.
+
+```{r, echo=F, warning=F, error=F}
+library(psych)
+
+red_wine <- read_csv('../winequality-red.csv')
+head(red_wine)
+
+red_wine %>% ggplot(aes(x=quality)) + 
+  geom_histogram(color='pink', fill='lightblue', bins=length(unique(red_wine$quality))) +
+  ggtitle('Y: Wine Quality') + theme_minimal() +
+  theme(plot.title = element_text(hjust=0.5))
+
+pairs.panels(red_wine,
+             method = 'pearson',
+             hist.col = 'steelblue',
+             density = TRUE,
+             ellipses = TRUE)
+```
+
+None of the independent variables are highly correlated with the response, though it is difficult to determine if this is meaningful or not given the nature of the response - $5$ categories. Some of the covariates are highly correlated which may cause for concern of multicollinearity.
+
+
+------------------
+
+## Binary Response
+
+To fit a model, treat wine quality as a binary variable, asssume a qualty $q \geq 7$ is considered _high quality_. Although range of possible scores of wine quality runs from $0-10$, the data only contains values from $3-8$, however I think the $q \geq 7$ threshold is still warrented as we are modeling _'high quality'_ wine.
+
+_'Volatile Acidity'_ & _'alcohol'_ display the highest correlation with the binary response.
+
+
+```{r, echo=F, warning=F, error=F}
+red_wine$response <- as.numeric(red_wine$quality >= 7)
+names(red_wine) <- gsub(" ", "_", names(red_wine))
+print(paste('Proportion of high quality wine:', mean(red_wine$response)))
+
+library(corrplot) 
+corrplot(cor(red_wine)[ncol(red_wine),1:(ncol(red_wine)-2),drop=F], cl.pos = 'n')
+
+```
+
+------------------
+
+## Class Imbalance
+
+Only a small fraction of $13.57%$ of wine is classified as high quality - this class imbalance may prove problematic when modeling the data. 
+
+Some issues arise with imbalanced classes [1]:
+ - ML algorithms struggle with accuracy because of the unequal distribution in dependent variable.
+ - This causes the performance of existing classifiers to get biased towards majority class.
+ - The algorithms are accuracy driven i.e. they aim to minimize the overall error to which the minority class contributes very little.
+ - ML algorithms assume that the data set has balanced class distributions.
+ - They also assume that errors obtained from different classes have same cost.
+ 
+ 
+Because of the imbalance, a model could simple allocate all predictions to the larger class (low quality wine) and achieve an $86.4%$ accuracy, thus other metrics warrent use.
+
+
+#### Potential Solutions
+
+Class imbalanced can be addressed in a variety of ways:
+  - _Undersampling_ reduces the number of observation in the _majority_ class (viable for excessively large datasets but is wasteful)
+  - _Oversampling_ replicates a number of observations in the _minority_ class (viable on smaller datasets but inherently leads to overfitting)
+  - _Synthetic data generation_ generates plausable artificial oberservations of the _minority_ class
+  - _CSL_ Cost Sensitive Learning overweights the importants of the _minority_ class
+  
+
+It is unclear which of these are viable on this _red wine_ dataset whilst fitting a GAM. I would imagine _CSL_ could work but would require an intelligently specified cost function. Synthetic Data Generation may be appropriate. Under & over sampling do not appear viable as the former loses too much data/information & the latter encourages overfitting.
+
+
+#### Performance Metrics
+
+Additional to the GAM specific metrics, a confusion matrix can be used to test the performance of a binary classification model.
+
+In addition to the GAM/MARS metrics, following will be computed:
+
+  * Accuracy Rate: $%$ of correctly classified observations
+  * Error Rate:    $1$ - accuracy rate 
+  * Precision:     $%$ of correctly classified _positive_ outcomes (high quality wine)
+  * Sensitivity:   $%$ of _actual_ positive observations classified correctly (also known as recall)
+  * Specificity:   $%$ of _actual_ negatives observations classified correctly
+  * ROC Curve:     Visualizes sensitivity vs (1-specificity) for various classification thresholds/cutoffs. Larger area under the curve the, above the 45 degree line, the better the model.
+  
+  
+```{r, echo=F, warning=F, error=F}
+library(directlabels)
+
+
+confusion_matrix <- function(y, yhat, cutoff=0.5) {
+  yhat <- yhat > cutoff
+  vectors <- cbind(y, yhat)
+
+  false_negative <- 0; false_positive <- 0; acc_0 <- 0; acc_1 <- 0
+  for (i in 1:nrow(vectors)) {
+    
+    if (vectors[i,1] == vectors[i,2]) {
+      # correct
+      if (vectors[i,1] == 1) acc_1 <- acc_1+1
+      else acc_0 <- acc_0+1
+    }
+    else {
+      # incorrect 
+      if (vectors[i,2] == 0) false_negative <- false_negative+1
+      if (vectors[i,2] == 1) false_positive <- false_positive+1
+    }
+  }
+  
+  accuracy <- (acc_0+acc_1)/ (false_negative+false_positive+acc_0+acc_1)
+  
+  vals <- matrix(c(acc_0, false_positive, false_negative, acc_1), nrow = 2)
+  colnames(vals) <- c('actual 0', 'actual 1')
+  rownames(vals) <- c('predicted 0', 'predicted 1')
+  vals <- as.table(vals)
+  
+  err_rate <-  1-accuracy
+  precision <- acc_1/(acc_1+false_positive)
+  sensitivity <- acc_1/(acc_1+false_negative)
+  specificity <- acc_0/(acc_0+false_positive)
+
+  list(contingency_table=vals, accuracy=accuracy, precision=precision, specificity=specificity, sensitivity=sensitivity)
+}
+
+
+
+
+
+roc_curve_base <- function() {
+  ggplot() + geom_abline(slope=1, linetype='dotdash') + ggtitle('ROC Curve') + theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5)) + ylim(c(0,1)) + xlim(c(0,1)) + xlab('1-specificity') + ylab('sensitivity')
+}
+
+roc_curve_add <- function(ggbase, y, yhat, col='steelblue', model_name=NA) {
+  specs <- c(0); sens <- c(0)
+  for (i in (0:100)/100) {
+    r <- confusion_matrix(y, yhat ,cutoff = i)
+    sens <- c(sens, r$sensitivity)
+    specs <- c(specs, (1-r$specificity))
+  }
+  specs <- c(specs, 1); sens <- c(sens, 1)
+  ggbase + 
+    geom_line(aes(x=specs, y=sens), col=col) +
+    geom_polygon(aes(x=specs, y=sens), fill=col, alpha=0.1) 
+   # geom_dl(aes(x=specs, y=sens), method = list('last.bumpup', cex = 1.4, hjust = 1), label=paste(' ', model_name), col=col)
+}
+
+
+```
+
+
+------------------
+
+## GAMs General Additive Models
+
+
+There are copious variation in possible GAMS, too many to explore. First we will a fit simpler model, without interaction, which will be used as a baseline model from which many possible combinations of interaction pairs will be examined.
+
+Two potential baseline GAMs are fit & examined:
+
+  1.NPCS: Natural Penalized Cubic Spline 
+      fit to each covariate (include shrinkage to avoid overfitting). The penality shrinks parameter coefficients towards $0$ to availd overfitting - via smoothing.
+      mgcv package $gam(y \sim s(x_1, , bs = "cs") + s(x_2, bs = "cs") + ...)$
+      
+      
+  2. TPRS: Low Rank Thin Plate Spline fit to each covariate
+      start with a full rank thin plate spline with a radial basis & thereafter reduce rank in an optimal mannor. This approach selects bases that capture the majority of the variance, avoiding the need for specficiation of specific knot locations.
+      mgcv package $gam(y \sim s(x_1) + s(x_2) + ...)$
+      
+      
+In both cases, the $family = binomial('logit')$ argument is used to fit a $logit$ link function - appropriate for modeling a binary respones variable.
+  
+
+```{r, echo=F, message=F, error=F}
+                            
+form <- as.formula(paste('response', 
+                         paste('s(',names(red_wine)[-c(12,13)],')', sep='', collapse=' + '),
+                         sep=' ~ '))
+
+
+form_cubic <- as.formula(paste('response', 
+                         paste('s(',names(red_wine)[-c(12,13)],', bs=\'cs\')', sep='', collapse=' + '),
+                         sep=' ~ '))
+
+
+print(' -----------------------------------    Thin Plate Splines    ----------------------------------- ')
+gm <- gam(form, data=red_wine, family = binomial('logit'))
+print(summary(gm))
+
+print(' -----------------------------------    Penalized Natural Cubic Splines    ----------------------------------- ')
+gm <- gam(form_cubic, data=red_wine, family = binomial('logit'))
+print(summary(gm))
+```
+
+
+Un-Biased Risk Estimator (UBRE) is very similar in each model ($-0.48722$ & $-0.48886$ in TPRS & NPCS respectively), however deviance explained is $44.9%$ using the penalized natural cubic splines (PNCS) as opposed to $41.6%$ using the thin plate splines. 
+
+PNCS also exibits more (absolute & degree) significant relationships with predictor variables - perhaps alluding to the models ability to better learn the relationship between the response & individual covariates. 
+
+Insignificant variables are not dropped yet incase their interaction terms prove to be useful predictors.
+
+Due to its higher deviance explained, PNCS is selected as the baseline model.
+
+
+### Identify Linear Relationships
+
+Certain relationships between covariates & the response may appear linear, this can be identified if the effective degrees of freedom is $0$ ($edf=0$). None of the individual terms in PNCS appear linear ($edf \approx 1$), so no linear terms are used.
+
+### Additional Metrics
+
+Now lets compute our additional metrics for the baseline model. A confusion matrix is constructed - calculating the number of correct & incorrect model predictions for a given classification cutoff/threshold - & is used to compute specificity, sensitivity, accuracy & the ROC curve.
+
+
+Specificity, sensitivity & accuracy are displayed using a $cutoff=0.5$
+
+```{r, echo=F, warning=F, error=F}
+
+confusion_matrix(y=red_wine$response, yhat=gm$fitted.value)
+
+r1 <- roc_curve_add(ggbase = roc_curve_base(), y=red_wine$response, yhat=predict(gm, type='response'))
+r1
+```
+
+Note that well all other metrics perform well, sensitivity (the proportion of actual high quality wine predicted to be high quality) is very low - a clear consequence of the imbalanced data.
+
+We will see if we can improve the model using GAM techniques first, & thereafter try to address the class imbalance.
+
+------------------
+
+
+## Interaction Effects
+
+Can we improve the model by adding interaction effects? Multidimensional splines can be incorporated into the model to model nonlinear covariate interaction. There is no reason to assume covariates exhibit a comparable scale, so Tensor Product basis splines are added.
+
+Interaction terms of $> 2$ are not used as these models aim to retain interpretability. 
+
+  
+  
+#### Number of Combinations
+
+We wish to find out which interaction terms are significant - separate from their individual effects. We thus add each possible interaction pair to the baseline model individually & test for significance. Tensor Product basis interaction terms are added by the $+ ti(x_1, x_2)$ function in the mgcv package. Using the default parameters, cubic regression spline marginal bases are used.
+
+Given our baseline model (response ~ all covariates using pncs with a penalty):
+  - allow every convariate to 'pair' with every other covariate
+  - add these pairs to the baseline model via a tensor product spline basis function
+  - record pairs that are significant (note that they need to be significant in their partial effects, additional to the individual pncs effects)
+  - after significant interaction pairs are identified, multiple combinations of pairs will be tested.
+  
+Tensor product interactions are used as covariates are not on an equal scale. Note: only interaction terms are added (so the _ti()_ function is used).
+
+
+
+#### Computation
+
+If there are $K$ covariates then there are $(K)(K-1)$ pairs. 
+
+Using a $p \text{ } value = 0.05$, individually add each interaction pair to the baseline model & test for significance. Iterate through all $(K)(K-1)$ interation pairs & record those that are significant $p \text{ } value = 0.05$.
+
+Though $p-values$ may not be a perfect approach, it offers a simple heuristic.
+
+There are 29 _significant_ interaction pairs:
+
+```{r, warning=F, error=F, echo=F}
+library(formula.tools)
+
+covars <- names(red_wine[, -c(12,13)])
+successful_pairs <- c()  
+succ_pairs_formula <- c()
+
+for (i in 1:(length(covars)-1)) {
+  for (j in (i+1):length(covars)) {
+    t1 <- covars[i]
+    t2 <- covars[j]
+    succ_pairs_formula <- c(succ_pairs_formula, paste('ti(', t1, ', ', t2, ')', sep = ''))
+    new_formula <- as.formula(paste(as.character(form_cubic), ' + ', paste('ti(', t1, ', ', t2, ')', sep = '')))
+    gm <- gam(new_formula, data=red_wine)
+    
+    gg <- summary(gm)
+    if (gg$s.table[nrow(gg$s.table),'p-value'] < 0.05) {
+      successful_pairs <- rbind(successful_pairs, c(t1,t2))
+    }
+  }
+}
+
+successful_pairs
+```
+  
+
+------------------
+
+## All Interaction Variations
+
+Ideally, one would not want to add all possible significant interaction pairs because the model becomes rather complex, however here I show why it is infeasible to compute many variants of the parameter specification: 
+
+
+To select an optimal model by exploring every variant of significant 2-dim interaction terms we would need to compute each possible combination (including $1$, $2$, or $k$ pairs in each model).
+
+If there are $\psi$ significant pairs, and we want to run different models, adding each $1$ significant pair at a time, thereafter adding each possible pair of pairs, then each tripplet etc. The total number of _additional_ models to compute can be calculated as:
+
+$$
+\begin{equation}
+\begin{split}
+ & = C_1^{\psi}  + C_2^{\psi}  + C_3^{\psi}  +  ... + C_{\psi-1}^{\psi}  \\
+ & = \sum_{1}^{\psi-1} C_{j}^{\psi}
+\end{split}
+\end{equation}
+
+$$
+
+In our case $\psi = 29$ thus there are $\sum_{1}^{28} C_{j}^{29} $ - which is exceedingly large.
+
+Clearly this is computationally exorbitant, even if we limit our number of interaction pair to $2$, resulting in $ 1 + \sum_{1}^{2} C_{j}^{29} = 1541$ models to compute.
+
+For this reason we cannot explore so many possible model configurations, & will instead add all $29$ significant pairs & see if any can be pruned.
+
+
+--------------
+
+
+
+## GAMs: Compute Various Model Specs
+
+We need a way to identify superior models. Models will be ranked by:
+
+Key metrics:
+  - Deviance Explained (variance explained)
+  - GCV (avoid overfitting)
+  - Specificity
+  - Sensitivity
+  - Accuracy
+  - ROC Curve
+  
+
+--------------
+
+## Combined model
+
+First we fit the combined model, which is the largest, most complex & computationally heavy specification. It is compiled by starting with the base line model (all individual terms) & adding all significant interaction pairs.
+
+The complexity of the model proves problematic, fitting the model is computationally heavy. 
+
+```{r, echo=F, error=F, warning=F}
+library(formula.tools)
+
+
+
+new_form <- form_cubic
+for (pair in 1:nrow(successful_pairs)) {
+  add_form <- paste('ti(', successful_pairs[pair,1], ', ', successful_pairs[pair,2], ')' )
+  new_form <- as.formula(paste(as.character(new_form), ' + ', add_form))
+
+}
+
+
+gm_all <- bam(new_form, data=red_wine, family = binomial('logit'))
+print('____________ fit using bam ____________')
+print(summary(gm_all))
+```
+
+
+Unfortunately this model fails to fit within a reasonable time frame & often crashes the R session - purely a consequence of the number of terms to compute & thus large memory is required. 
+
+The _bam_ function - from _mgcv_ package - is used to implement this large model. The documentation does not specify the details of _bam_ apart from stating that is is a computationally efficient alternative to _gam_ that runs the algorithm in parallel. 
+
+The _bam_ default fitting method is residual maximum likelihood, which is kept as the algorithm experiences the same computational difficulties when min _GCV_ method is used.
+
+The results using _bam_ are not satisfactory at all, the deviance explained is only $48.8%$ and the majority of parameters are not significant.
+
+
+Lets compute the other other performance metrics:
+
+```{r, echo=F, error=F, warning=F}
+
+confusion_matrix(y=red_wine$response, yhat=gm_all$fitted.value)
+
+r2 <- roc_curve_add(ggbase = r1, y=red_wine$response, yhat=predict(gm_all, type='response'), col='darkred')
+r2
+
+```
+
+
+The ROC of roughly matches the baseline model, so no tangible benefit has arisen from the over-parameterization.
+
+
+I was able to fit the model once using _gam_ & with the _GCV_ method which produced a deviance explained north of $80%$ - I cannot replicate this model for the markdown file as computational issues arise & the R Session crashes.
+
+This _full_ model is taken as a starting point to select interaction pairs. There are a multitude of insignificant parameter coefficients - many of the interaction terms: perhaps due to multicollinearity between terms. 
+
+
+
+
+
+
+--------------
+
+## Prune Model
+
+Can we remove insignificant Terms & maintain performance whilst simplifying the model & improving Interpretability? An important goal of GAMS is to maintain parameter interpretability. To aid this goal, we'll now prune the model by removing all _insignificant_ parameter (judged when the _gam_ model was fit, not the _bam_ model) estimates & assess if it's detrimental effects to the model performance substantiate inclusion of all these (possibly redundant) terms. 
+
+
+
+```{r, echo=F, error=F, warning=F}
+
+
+new_form_2 <- as.formula('response ~ 
+    s(fixed_acidity, bs = "cs") + 
+    s(volatile_acidity, 
+    bs = "cs") + s(citric_acid, bs = "cs") + 
+    s(residual_sugar, bs = "cs") + 
+    
+    s(free_sulfur_dioxide, 
+    bs = "cs") + 
+    s(total_sulfur_dioxide, bs = "cs") + 
+
+    s(sulphates, bs = "cs") + 
+    s(alcohol, bs = "cs") + 
+    ti(fixed_acidity, volatile_acidity) + 
+
+    ti(fixed_acidity, residual_sugar) + 
+    ti(fixed_acidity, free_sulfur_dioxide) + 
+    ti(fixed_acidity, density) + 
+
+    ti(volatile_acidity, density) + 
+    ti(volatile_acidity, sulphates) + 
+
+    ti(citric_acid, total_sulfur_dioxide) + 
+    ti(citric_acid, density) + 
+
+    ti(residual_sugar, alcohol) + 
+
+    ti(free_sulfur_dioxide, alcohol) + 
+    ti(total_sulfur_dioxide, density) + 
+    ti(total_sulfur_dioxide, sulphates) + 
+    ti(total_sulfur_dioxide, alcohol) + 
+
+    ti(pH, alcohol) +
+    ti(sulphates, alcohol)')
+
+gm_prune <- gam(new_form_2, data=red_wine, family= binomial('logit'), method = 'GCV.Cp')
+summary(gm_prune)
+```
+
+
+
+```{r, echo=F, error=F, warning=F}
+confusion_matrix(y=red_wine$response, yhat=gm_prune$fitted.value)
+r3 <- roc_curve_add(ggbase = r1, y=red_wine$response, yhat=predict(gm_prune, type='response'), col='darkgreen')
+r3 
+```
+
+
+
+This is by far the best model we have examine thus far, with a Deviance explained = $72.8%$ & the majority of the coefficients are significant (though not all). Many of the insignificant terms are also approximately linear (effective degrees of freedom $\approx 1$). 
+
+Sensitivity & specificity are both very high across most cutoff thresholds. The over parameterization of the model (excess terms) may have resulted in multicollinearity &/or overfitting.
+
+The model is pruned once more - again removing the insignificant terms - & re-fit:
+
+
+
+
+ti   
+ti(citric_acid,total_sulfur_dioxide)   1.000  1.000  2.957 0.085575 .  
+ti(citric_acid,density)               13.504 14.390 38.846 0.000493 ***
+ti(residual_sugar,alcohol)            11.127 12.160 39.314 0.000159 ***
+ti(free_sulfur_dioxide,alcohol)       16.000 16.000 40.078 0.000755 ***
+ti(total_sulfur_dioxide,density)      12.873 13.833 42.238 7.88e-05 ***
+ti(total_sulfur_dioxide,sulphates)    10.006 10.407 20.699 0.023538 *  
+ti(total_sulfur_dioxide,alcohol)       1.000  1.000  2.161 0.141571    
+ti(pH,alcohol)                         4.000  4.000 22.019 0.000199 ***
+ti(sulphates,alcohol)                 13.499 14.120 28.563 0.014063 * 
+
+```{r, echo=F, error=F, warning=F}
+
+
+new_form_3 <- as.formula('response ~ 
+    s(fixed_acidity, bs = "cs") + 
+    s(volatile_acidity, bs = "cs") + 
+    s(citric_acid, bs = "cs") + 
+    s(residual_sugar, bs = "cs") + 
+    s(free_sulfur_dioxide, bs = "cs") + 
+    s(total_sulfur_dioxide, bs = "cs") + 
+    s(sulphates, bs = "cs") + 
+    s(alcohol, bs = "cs") + 
+    ti(fixed_acidity, volatile_acidity) + 
+  
+    ti(fixed_acidity, free_sulfur_dioxide) + 
+    ti(fixed_acidity, density) + 
+
+    ti(citric_acid, total_sulfur_dioxide) + 
+    ti(citric_acid, density) + 
+
+    ti(residual_sugar, alcohol) + 
+
+    ti(free_sulfur_dioxide, alcohol) + 
+    ti(total_sulfur_dioxide, density) + 
+    ti(total_sulfur_dioxide, sulphates) + 
+
+    ti(pH, alcohol) +
+    ti(sulphates, alcohol)')
+
+gm_prune2 <- gam(new_form_3, data=red_wine, family= binomial('logit'), method = 'GACV.Cp')
+print(summary(gm_prune2))
+```
+
+Deviance explained is virtually unchanged, most parameters are significant & the model is simpler.
+
+
+```{r, echo=F, error=F, warning=F}
+confusion_matrix(y=red_wine$response, yhat=gm_prune2$fitted.value)
+r3 <- roc_curve_add(ggbase = r1, y=red_wine$response, yhat=predict(gm_prune2, type='response'), col='darkred')
+r3 
+```
+
+
+When compared to the original baseline model, the superior ROC curve (larger area under the curve about the 45 degree line) is indicative of the models improved performance accross metrics. All metrics - accuracy, specificity, & most notably, sensitivity have increased substantially.
+
+
+Given it's superior performance across metrics, this GAM will be used.
+
+--------------
+
+
+## Multivariate Adaptive Regression Splines 
+
+MARS models boast the advantage of simplicity, as the nature by which they are fit automates parameter selection/inclusion choices. Models are fit using the _earth_ function from the _earth_ package.
+
+
+### Arguments
+
+The following specifications were used when fitting the model. Apart from $degree=2$ to allow for interaction terms, the initial model uses mostly default parameters, however the model is specified to fit a binary response & to allow for interaction.
+
+The $family = binomial$ argument is used to fit a $logit$ link function - appropriate for modeling a binary respones variable.
+
+
+  * $degree=2$: degree of interation (default=1 -> no interation)
+
+  * $penalty = if(degree>1) 3 else 2$: GCV penalty per knot
+
+  * $nk = min(200, max(20, 2 * ncol(x))) + 1$: maximum number of model terms before pruning (created in forward pass). Usually less because of a termination condition
+
+  * $thresh = 0.001$: termination argument. If adding a term changes RSq by less than _thresh_, forward pass is terminated.
+
+  * $pmethod = 'backward'$: pruning method
+
+  * $nprune = NULL$: maximum number of terms in the pruned model. Null implies no restrictions on the model 
+
+
+_dev.ratio_ is defined as:
+The fraction of (null) deviance explained. The deviance calculations incorporate
+weights if present in the model. The deviance is defined to be 
+$2*(loglikesat -loglike)$, where loglike_sat is the log-likelihood for the saturated model (a model
+with a free parameter per observation). Hence dev.ratio=1-dev/nulldev.
+
+This is equivant to deviance explained.
+
+
+
+```{r, echo=F, error=F, warning=F}
+library(earth)
+
+earth.mod <- earth(response ~., data=red_wine[,-c(12)], degree = 2, glm=list(family=binomial('logit')))
+plotmo(earth.mod)
+summary(earth.mod, digits = 3, style = "bf")
+```
+
+
+The parameters are not changed for the following reasons:
+  * $degree$: The results are virtually identical for degree$>2$ & we do not wish to add higher level interaction terms.
+
+  * $penalty$: Intelligently specified, there is no need to change the penalty as a GCV penality is already used.
+
+  * $nk$: The default specification allows for at least $2$ per column of X (covariate) plus an additional term. This is ample to allow for prominant interaction pairs & an intercept.
+
+  * $thresh$: Is sufficiently low.
+
+  * $pmethod$: Is sufficient.
+
+  * $nprune$: Changing this from Null wouuld only apply further unnecessary restrictions to the model.
+
+
+Empirically I tried increasing $degree$ & $nk$ to relax the model however no notable change in deviance ratio or GCV was achieved. As such this standard implementation of the earth package to fit the MARS model will be used,
+
+
+Now we can examine the MARS model along the lines of our other metrics:
+
+```{r, echo=F, error=F, warning=F}
+
+
+confusion_matrix(y=red_wine$response, yhat=predict(earth.mod, type='response'))
+r4 <- roc_curve_add(ggbase = r3, y=red_wine$response, yhat=predict(earth.mod, type='response'), col='darkgreen')
+r4
+```
+
+
+With the same $0.5$ cuttoff, the MARS model clearly performs worse than the GAM, infact worse than the baseline Gam. Notably, although the parameter specification allows for interaction terms, none remain after the pruning stage of the MARS algorithm.
+
+The ROC curve (MARS model in blue) shows that the models predicitive capability is inferior accross all cutoff thresholds for both False Positives & False Negatives.
+
+
+$Accuracy = 0.8999375$
+
+$Precision = 0.7244094$
+
+$Specificity = 0.9746744$
+
+$Sensitivity = 0.4239631$
+
+$GCV = 0.0791$
+
+$Deviance Explained = 0.37$
+
+Although the MARS model scores worse on most metrics, it is, however:
+  - simple
+  - easy to fit
+  - does not require expert knowledge
+  - interpretable
+  - serves as a good baseline model from which to investigate parameter effects
+
+
+
+---------------
+
+## Neural Nets
+
+Both GAMs & MARS learn significant relationships between covariates (individual & interaction terms) however they are restricted to allow for interpretability.
+
+For a baseline comparison, a neural network is fit to assess if significant nonlinear interaction terms are able to better capture the true relationship in the data - at the cost of interpretability. 
+
+### Network parameterization
+
+- The data is scale 
+- The data is split into a 80/20 train/test split
+- Model architecture: $11:3:2:1$ ($11$ covariates, two hidden layers consisting of $3$, then $2$, nodes & $1$ binary predictor)
+- Learning algorithm: resilient backpropagation with and without weight backtracking (the default for the _neuralnet_ package in R)
+
+
+## Performance
+
+The model achieves an impressive _testing_ accuracy of almost 90%:
+
+$$acuracy = 0.875$$
+
+Unforunately, given the class imbalance this result could be achieved by simple assigning all predictions to _poor quality_.
+
+The neural net to capture nonlinearity & interaction (at the cost of interpretibility).
+
+```{r, echo=F, error=F, warning=F}
+library(neuralnet)
+
+set.seed(1)
+data <- as.data.frame(scale(red_wine[1:1280,-c(12,13)]))
+f <- as.formula(paste('red_wine$response[1:1280] ~ ', paste(names(data), collapse=' + '), collapse = ''))
+nn <- neuralnet(f,data=data,hidden=c(3,2),linear.output=F)
+plot(nn)
+
+ANN_pred <- predict(nn, as.data.frame(scale(red_wine[1280:1599,-c(12,13)]))) 
+confusion_matrix(y=red_wine$response[1280:1599], ANN_pred)
+roc_curve_add(ggbase = r4, y=red_wine$response[1280:1599], ANN_pred, col='black')
+
+
+```
+
+
+The Neural net performs worse that both existing models along the ROC curve, however it is the only model subject to prevention of overfitting by splitting the data into a train-test-split.
+
+A consequence of this split is insufficient data to train a more complex model (larger parameter space). If we forgo this train-test-split we are able to better capture the relationships in the data & score higher results - at the risk of overfitting. 
+
+They are still inferior to that of MARS & GAMS, and the improvement may simply be a consequence of overfitting to the data. We also forfiet reasonable interpretabilty - this model is clearly inferior but may be kept for comparison. It also boasts the advantaged of minimal expert knowledged needed to fit and achieve a reasonable outcome.
+
+Here we fit the same network without the train-test-split:
+
+```{r, echo=F, error=F, warning=F}
+
+data_full <- as.data.frame(scale(red_wine[,-c(12)]))
+f_full <- as.formula(paste('response ~ ', paste(names(data_full), collapse=' + '), collapse = ''))
+nn_full <- neuralnet(f_full,data=data_full,hidden=c(3,2), linear.output=F)
+
+ANN_pred_full <- predict(nn_full, data_full) 
+confusion_matrix(y=red_wine$response, ANN_pred_full)
+
+```
+
+
+This model without train test split completely overfits the data & should be disgarded.
+
+
+--------------
+
+## Final Models
+
+Now we have selected $3$ potential models:
+  - GAM
+  - MARS
+  - ANN
+  
+We can now compare these models across the various specified metrics. Finally, the class imbalance ought to be taken into consideration.
+
+
+
+Lets examine their respective ROC curves once more:
+  - GAM:   blue
+  - MARS:  green
+  - ANN:   red
+
+
+```{r, echo=F, error=F, warning=F}
+
+
+r1 <- roc_curve_add(ggbase = roc_curve_base(), y=red_wine$response, gm_prune2$fitted.values, col='darkblue')
+r2 <- roc_curve_add(ggbase = r1, y=red_wine$response, predict(earth.mod, type='response'), col='darkgreen')
+r3 <- roc_curve_add(ggbase = r2, y=red_wine$response[1280:1599], 
+                    predict(nn, as.data.frame(scale(red_wine[1280:1599,-c(12,13)]))), col='darkred')
+r3
+
+
+
+```
+
+
+It's evident that the GAM is the superior model, exceeding the alternatives in both senstivity & specificity across any cutoff threshold.
+
+Let's take a closer look at the sensitivity & specificity achieved at a $50%$ cutoff:
+
+```{r, echo=F, warning=F, error=F}
+library(cowplot)
+
+d <- data.frame(response=red_wine$response, yhat=predict(earth.mod, type='response'), class='MARS')
+d$yhat <- d$response.1
+
+dataset <- do.call('rbind', list(
+  data.frame(response=red_wine$response, yhat=gm_prune2$fitted.values, class='GAM'),
+  d[,-c(2)],
+  data.frame(response=red_wine$response[1280:1599], yhat=ANN_pred, class='ANN')))
+
+
+
+
+MARS <- confusion_matrix(y=red_wine$response, yhat=predict(earth.mod, type='response'))
+GAM <- confusion_matrix(y=red_wine$response, yhat=gm_prune2$fitted.values)
+ANN <- confusion_matrix(y=red_wine$response[1280:1599], yhat=ANN_pred)
+
+data_res <- do.call('rbind', list(
+  data.frame(specificity=MARS$specificity, sensitivity=MARS$sensitivity, accuracy=MARS$accuracy, class='MARS'),
+  data.frame(specificity=GAM$specificity, sensitivity=GAM$sensitivity, accuracy=GAM$accuracy, class='GAM'),
+  data.frame(specificity=ANN$specificity, sensitivity=ANN$sensitivity, accuracy=ANN$accuracy, class='ANN')
+))
+
+
+
+
+
+p1 <- ggplot(data_res) +
+  geom_point(aes(x=class, y=sensitivity, col=class)) + theme_minimal() + xlab('') + ggtitle('Sensitivity') +
+  theme(plot.title = element_text(hjust=.5)) + ylab('') +
+  geom_segment(aes(x=class, xend = class, y = 0, yend = sensitivity, col=class)) 
+
+
+p2 <- ggplot(data_res) +
+  geom_point(aes(x=class, y=specificity, col=class)) + theme_minimal() + xlab('') + ggtitle('Specificity') +
+  theme(plot.title = element_text(hjust=.5)) + ylab('') +
+  geom_segment(aes(x=class, xend = class, y = 0, yend = specificity, col=class)) 
+
+
+plot_grid(p1, p2)
+```
+
+
+Again, the GAM is the superior model, however the MARS model performs well too & is a simpler, more interpretable, option.
+
+Finally lets compare deviance explained by the GAM & MARS models, deviance explained given by:
+
+$$deviance \text{ } explained = 1 - \frac{Deviance}{Null \text{ } Deviance}$$
+
+```{r, warning=F, error=F, echo=F}
+print(' ------------- Deviance Explained ------------- ')
+print(paste('GAM: ', round(summary(gm_prune2)$dev.expl, 3)*100, "%", sep=''))
+print(paste('MARS: ', 0.376*100, "%", sep=''))
+
+
+```
+
+Again, the GAM is the clear choice. The pruned GAM bests it's alternatives across all metrics & should be the chosen model. The MARS model is, however, simpler, easier to fit & has fewer parameters (which are then more interpretable). The ANN offers no readily observable advantage.
+
+One caveat is the class imbalance, it is possible that the GAM is achieving superiority by overfitting the data, here we will investigate refitting the models whilst considering class imbalance.
+
+-------------------
+
+## Addressing Class Imbalance 
+
+
+### Imbalanced Data: Generate Data for Upsampling & Compare Again
+
+As an attempt to address the issue of class imbalance, the $3$ model are compared once more. Returning to the aforementioned options:
+  - _Undersampling_ is inappropriate because we cannot afford to disregard so much data
+  - _Oversampling_ may be viable but will inherently lead to overfitting 
+  - _CSL_ Cost Sensitive Learning is complicateed & cumbersome
+  - _Synthetic data generation_ may offer a viable solution, we will implement this approach
+  
+
+  
+  
+###  Synth Data Generation
+
+#### SMOTE: Synthetic Minority Oversampling TEchnique 
+
+
+Synthetic minority oversampling technique (SMOTE) creates artificial data in the minority class (_high quality wine_) in the feature space by:
+
+  1. Take the difference between the feature vector (sample) under consideration and its nearest neighbor.
+  2. Multiply this difference by a random number between 0 and 1
+  3. Add it to the feature vector under consideration
+  4. This causes the selection of a random point along the line segment between two specific features
+
+
+#### ROSE: Random Over-Sampling Examples
+
+The ROSE algorithm generates artificial samples from the classes according to a smoothed bootstap approach from [2] and [3].
+
+The details of the implementation are superfluous to our needs, but essentially the algorithm probabilistically samples from the data & generates artificial data within a neighbourhood of the samples.
+
+----------
+
+## Fitting Class Imbalance
+
+In an attempt to alleviate the issues associated with the class imbalance, here we compare the $3$ selected algorithms _after_ addressing the class imbalance by generating additional artificial data.
+
+The following proceedure is followed:
+
+  1. Split the data into train-test-split (70-30-split)
+  2. Generate artificial data belonging to the 'high quality' class based ONLY on the training data
+  4. Fit the model
+  5. Assess the model on the testing set
+
+
+
+First we randomly split the dataset & create the new, balanced, training dataset.
+
+```{r, echo=F, error=F, warning=F}
+library(ROSE)
+
+
+train_test_split <- function(dataset, split=0.7) {
+  n <- nrow(dataset); i <- round(split*n)
+  index <- sample(i, replace=F)
+  train <- dataset[index, ]
+  test <- dataset[-index, ]
+  list(train=train, test=test)
+}
+
+rw <- red_wine[,-c(12)]
+res <- train_test_split(rw)
+
+trainset <- res$train; testset <- res$test
+
+```
+
+Once the data has been split, the ROSE algorithm is implemented to generate artificial training data in order to balance the classes (number of wine bottles classified as high quality). 
+
+```{r, warning=F, error=F, echo=F}
+library(ROSE)
+
+trainset <- res$train; testset <- res$test
+rose_data <- ROSE(response~., data=trainset)
+
+
+```
+
+Thereafter we fit each other $3$ respective models on the balanced training set.
+
+```{r, warning=F, error=F, echo=F}
+
+
+# ---- GAM ----x
+start_time <- Sys.time()
+print(' Fitting GAM .... ')
+gm_prune2_2 <- gam(new_form_3, data=rose_data$data, family= binomial('logit'))
+end_time <- Sys.time()
+print(paste('GAM trained in :', round(end_time - start_time,3), 'seconds'))
+print('________________________________________________________')
+
+# ---- MARS ----x
+start_time <- Sys.time()
+print(' Fitting MARS .... ')
+earth.mod_2 <- earth(response ~., data=rose_data$data, degree = 2, glm=list(family=binomial('logit')))
+end_time <- Sys.time()
+print(paste('MARS trained in :', round(end_time - start_time,3), 'seconds'))
+print('________________________________________________________')
+
+
+# ---- ANN ----x
+start_time <- Sys.time()
+print(' Fitting ANN .... ')
+set.seed(104)
+nn_2 <- neuralnet(response ~. ,data=scale(rose_data$data), hidden=c(3,2), linear.output=F)
+end_time <- Sys.time()
+print(paste('ANN trained in :', round(end_time - start_time,3), 'seconds'))
+print('________________________________________________________')
+
+```
+
+
+
+Assessing the model performance on the training data would not make logical sense as the additional artificial data would allow for severe overfitting. 
+
+## Assess on the testing dataset
+
+Lets predict the unseen testing dataset, to assess the models ability to generalize. Again:
+
+  - GAM:   blue
+  - MARS:  green
+  - ANN:   red
+
+
+```{r, echo=F, error=F, warning=F}
+
+
+# ---- predict models ----x
+yhat_GAM <- predict(gm_prune2_2, testset[,-c(12)], type='response')
+yhat_MARS <- predict(earth.mod_2, testset[,-c(12)], type='response')
+yhat_ANN <- predict(nn_2, scale(testset[,-c(12)]), type='response')
+y <- testset$response
+
+
+r1 <- roc_curve_add(ggbase = roc_curve_base(), y=y, yhat=yhat_GAM, col='darkblue')
+r2 <- roc_curve_add(ggbase = r1, y=y, yhat=yhat_MARS, col='darkgreen')
+r3 <- roc_curve_add(ggbase = r2, y=y, yhat=yhat_ANN, col='darkred')
+r3
+
+```
+
+
+These results meaure the models ability to generalize by assessing their performance on unseen data. Without the opportunity to overfit, it appears that the _GAM_'s performance is significantly worse than in the model without splitting the data. The _GAM_ and _MARS_ models appear to yield similar performance. 
+
+The _ANN_ matches the performance of the previous two models at certain threshold values.
+
+
+Let's take a closer look at the sensitivity & specificity achieved at a $50%$ cutoff:
+
+```{r, echo=F, warning=F, error=F}
+library(cowplot)
+
+
+
+MARS <- confusion_matrix(y=y, yhat=yhat_MARS)
+GAM <- confusion_matrix(y=y, yhat=yhat_GAM)
+ANN <- confusion_matrix(y=y, yhat=yhat_ANN)
+
+data_res <- do.call('rbind', list(
+  data.frame(specificity=MARS$specificity, sensitivity=MARS$sensitivity, accuracy=MARS$accuracy, class='MARS'),
+  data.frame(specificity=GAM$specificity, sensitivity=GAM$sensitivity, accuracy=GAM$accuracy, class='GAM'),
+  data.frame(specificity=ANN$specificity, sensitivity=ANN$sensitivity, accuracy=ANN$accuracy, class='ANN')
+))
+
+
+
+p1 <- ggplot(data_res) +
+  geom_point(aes(x=class, y=sensitivity, col=class)) + theme_minimal() + xlab('') + ggtitle('Sensitivity') +
+  theme(plot.title = element_text(hjust=.5)) + ylab('') +
+  geom_segment(aes(x=class, xend = class, y = 0, yend = sensitivity, col=class)) 
+
+
+p2 <- ggplot(data_res) +
+  geom_point(aes(x=class, y=specificity, col=class)) + theme_minimal() + xlab('') + ggtitle('Specificity') +
+  theme(plot.title = element_text(hjust=.5)) + ylab('') +
+  geom_segment(aes(x=class, xend = class, y = 0, yend = specificity, col=class)) 
+
+
+plot_grid(p1, p2)
+```
+
+----------
+
+## Final Unbiased Section 
+
+Interestly it appears that all model achieve similar performance.
+
+This second implementation is more generalizable (fitting a train-test-split & ROSE data generation) & accordingly, should be used for the basis of model selection.
+
+The _ANN_ can be eliminated first: although it converges very quickly, it is the least interpretable model & this cost is not met by any improved performance.
+
+
+For a final additional numerical metric, lets compare the deviance explained for the _GAM_ & _MARS_ models.
+
+
+```{r, warning=F, error=F, echo=F}
+
+print(' ------------- Deviance Explained ------------- ')
+print(paste('GAM: ', round(summary(gm_prune2_2)$dev.expl, 3)*100, "%", sep=''))
+print(paste('MARS: ', 0.393*100, "%", sep=''))
+
+```
+
+## Conclusion
+
+_GAM_ takes a slight edge in _deviance explained_ over the _MARS_ model ($45.3\%$ and $39.3\%$ respectively). This small advanced in accounting for variation does not, however, substantiate some of the _GAM's_ short-commings.
+
+Across other numerical metrics (sensitivity, accuracy & area under a ROC curve) the models are indistinguishable.
+
+The _MARS_ model is also:
+  - simpler
+  - more computationally efficient 
+  - automatic
+  - does not include interaction terms
+  - more readily interpretable (as a consequence of model terms/structure)
+
+The _MARS_ model should thus be selected as the superior choice.
+
+
+
+
+---------------
+
+## References
+
+1. https://www.analyticsvidhya.com/blog/2016/03/practical-guide-deal-imbalanced-classification-problems/
+
+
+2. Lunardon, N., Menardi, G., and Torelli, N. (2014). ROSE: a Package for Binary Imbalanced Learning. R Jorunal, 6:82–92.
+
+3. Menardi, G. and Torelli, N. (2014). Training and assessing classification rules with imbalanced data. Data Mining and Knowledge Discovery, 28:92–122.
+
+
+---------------------------------------------------------------------------------------------------------------------------------------------
+
+
+
+
+# Question 3: GAMs & MARS
+
+Question 3: GAMs and MARS
+The data here are on the quality of red wine. The measurements relate to red variants of the Portuguese “Vinho Verde” wine. For details see the reference Cortez et al., 2009. Due to privacy and logistic issues, only physicochemical (inputs) and sensory (the output) variables are available (e.g. there is no data about grape types, wine brand, wine selling price, etc.). The data were obtained from Kaggle. The data are in file
+winequality-red.csv.
+The data can be analysed via classification or regression. The classes are ordered and not balanced (e.g. there
+are more normal wines than excellent or poor ones).
+For this project investigate which properties determine the quality of wine. Choose a cutoff and treat quality as a binary variable, 1 for good, 0 for not so good. Use both GAMs and MARS to find a model which will allow you to predict the quality of wine. Clearly describe all settings / specifications you have used. You can use R’s GAM functions.
+Illustrate your results. Compare GAMs and MARS with respect to fitted curves, and predictive accuracy. Interpret your results and give conclusions.
+
+
+
+
+
+

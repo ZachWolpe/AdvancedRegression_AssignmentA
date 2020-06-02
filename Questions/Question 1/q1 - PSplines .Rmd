@@ -1,0 +1,478 @@
+---
+title: "Question 1: P Splines"
+output: html_document
+---
+
+# Advanced Regression Assignment A
+
+##### Zach Wolpe                                 
+##### WLPZAC001
+_01 June 2020_
+
+------------------
+
+
+
+```{r setup, include=FALSE, warnings=F, error=F}
+setwd("~/Desktop/MSc Advanced Analytics/Advanced Regression/Assignments/AR Assignment 1/final implementation")
+library(ggplot2)
+library(splines)
+library(tidyverse)
+library(psych)
+library(earth)
+library(mgcv)
+library(MASS)
+library(rmarkdown)
+```
+
+## Raw Data
+
+
+We wish to understand how body fat percentage of woman from $3$ villages in West Africa changes with age. The woman's bodyfat appears to have a nonlinear, heteroscedastic, relationship with their ages'. First, lets visualize the data, we will focus on modeling the log tricept data.
+
+```{r, warnings=F, error=F, echo=FALSE}
+setwd("~/Desktop/MSc Advanced Analytics/Advanced Regression/Assignments/AR Assignment 1/final implementation")
+triceps <- read.csv('Datasets/triceps.csv')
+
+triceps$log_lntriceps <- log(triceps$lntriceps)
+triceps$log_triceps <- log(triceps$triceps)
+
+
+ggplot(triceps) +
+  geom_point(aes(x=age, y=triceps), col='steelblue', alpha=0.7) +
+  theme_minimal() + ggtitle('tricep fat') +
+  theme(plot.title = element_text(hjust=0.5)) + ylab('') 
+
+
+ggplot(triceps) +
+  geom_point(aes(x=age, y=log_triceps), col='darkred', alpha=0.7) + 
+  theme_minimal() + ggtitle('log tricep fat') +
+  theme(plot.title = element_text(hjust=0.5)) + ylab('') 
+
+```
+
+------------------
+
+## Cubic B-Spline Basis
+
+We construct B-Spline basis over the range of the predictor variable (age) with $20$ evenly spaced knots & $3$ degrees of freedom.
+
+Model the data with the unpenalized B-Spline basis, then visualize the results.
+
+```{r, warnings=F, error=F, echo=FALSE}
+library(splines)
+basis <- bs(triceps$age, knots=seq(0, 52, length.out=20))
+
+cubic_basis <- function(y, basis_type, y_name, c1, c2) {
+  model <- lm(y~basis)
+  print(summary(model))
+  pred <- predict(model, basis, interval='confidence') 
+  pred <- as.data.frame(pred)
+  pred$age <- triceps$age
+
+  gg <- ggplot(triceps) +
+    geom_point(aes(x=age, y=y), col=c1, alpha=0.7) + 
+    theme_minimal() + ggtitle(paste(basis_type,': ', y_name, sep='')) +
+    theme(plot.title = element_text(hjust=0.5)) + ylab('') +
+    geom_smooth(data=pred, aes(x=age, y=fit, ymin=lwr, ymax=upr), color=c2, fill=c2,  stat='identity')
+  print(gg)
+
+  model$pred <- pred
+  model  
+}
+
+model <- cubic_basis(triceps$triceps, 'Cubic B-Spline', 'tricep', 'orange', 'steelblue')
+model <- cubic_basis(triceps$lntriceps, 'Cubic B-Spline', 'log intricep', 'lightblue', 'darkred')
+
+```
+
+
+
+The model appears to overfit the data, presenting a violent, jagged curve that bounces between datapoints.
+
+It's also noteworthy that the variation grows as a function of $x=age$, it is clear to see the data becomes more widespread with age.
+
+The model appears to overfit the data, more generalizable results may be achieved by penalizing the parameter coefficients.
+
+------------------
+
+## P-Splines 
+
+Add a square difference penalty to the model to penalize large discrepencies in adjacent coefficients. The penalty:
+
+$$ P =\sum_{i=1}^{k-1} (\beta_{i+1} - \beta_{i})^2 $$
+
+Thus minimizing the penalized least squares:
+
+$$PSS = ||y - X\beta||^2 + \lambda \beta`P\beta$$
+
+Yielding the solution (for a given $\lambda$):
+
+$$\beta = (X`X + \lambda P)^{-1} X`y$$
+
+
+The PLS is computed for a given $\lambda$ values, here we fit it for $\lambda=10$. Here we learn the function by optimizing (minimizing) the $PSS$ function.
+
+```{r, warnings=F, error=F, echo=FALSE}
+
+# ---- Plot ----x
+plot_spline <- function(y,yhat,c1,c2, title, lambda) {
+  title <- paste(title, '   λ:', lambda, sep = '')
+  ggplot(triceps) +
+  geom_point(aes(x=age, y=y), col=c1, alpha=0.7) + 
+  theme_minimal() + ggtitle(title) + 
+  theme(plot.title = element_text(hjust=0.5)) + ylab('') +
+ # geom_smooth(data=pred, aes(x=age, y=pred[,1], ymin=pred[,2], ymax=pred[,3]), color=c2, fill=c2,  stat='identity')
+  geom_smooth(aes(x=age, y=yhat), color=c2, fill=c2,  stat='identity')
+}
+
+y <- triceps$lntriceps
+X <- basis
+
+compute_yhat <- function(lambda, y=y, X=X, beta=rep(0,23)) {
+  PSS <- function(y, X, l, beta) {
+    pen <- 0
+    for (i in 1:(length(beta)-1)) {
+      pen <- pen + (beta[i+1] - beta[i])^2
+    }
+    sum((y-X%*%beta)^2) + l*pen
+  }
+  res <- nlm(PSS, p = rep(0,23), y=y, X=X, l=lambda)
+  yhat <- X %*% res$estimate
+  yhat
+}
+
+l <- 10
+yhat <- compute_yhat(l,  y=y, X=X, beta=rep(0,23))
+plot_spline(y=y,yhat=yhat, c1 = 'lightblue', '#840000', 'Difference Penalty', l)
+```
+
+This appears to be a more reliable fit to the data.
+
+On the extreme cases:
+
+- $\lambda=0$ the orignal unpenalized model is fitted
+- $\lambda=\infty$ no deviation between consequtive parameters will be tolerated, thus fitting a straight line.
+
+
+
+```{r, warnings=F, error=F, echo=FALSE}
+par(mfrow=c(2,1))
+l <- 0
+yhat <- compute_yhat(l,  y=y, X=X, beta=rep(0,23))
+plot_spline(y=y,yhat=yhat, c1 = '#03396c', 'red', 'Difference Penalty', l)
+
+l <- 10000000
+yhat <- compute_yhat(l,  y=y, X=X, beta=rep(0,23))
+plot_spline(y=y,yhat=yhat, c1 =  '#03396c', 'red', 'Difference Penalty', l)
+```
+
+
+
+
+Using a very strong penalty (high lambda) forces the model to smooth.
+
+------------------
+
+## Optimize Lambda 
+
+The function is heavily reliant on a suitable choice for $lambda$, to find the optimal model, $lambda$ should be be selected to minimize Generalized Cross Validation GCV (a computationally simple approximation for LOOCV).
+
+GCV is computed as:
+
+$$GCV(\hat{f}) = \frac{1}{N} \sum_{i=1}^N(\frac{y_i- \hat{f}(x_i)}{1 - trace(S)/N})^2$$
+
+Where $S$:
+
+$$
+\begin{equation} 
+\begin{split}
+\hat{y} &= Sy \\
+\hat{y} &= Sy \\
+X\hat{\beta} &= Sy \\
+X(X`X  + λP)^{-1}X`y &= Sy \\
+X(X`X  + λP)^{-1}X` &= S
+\end{split}
+\end{equation}
+$$
+
+
+
+Here I compute the model for various $\lambda$ values to find the model that minimizes GCV (thus minimizes the average predictive error in the model).
+
+
+
+```{r, warnings=F, error=F, echo=FALSE}
+
+compute_P_matrix <- function() {
+  P <- c(1, -1, 0, rep(0, 20))
+  for (i in 1:21) {
+    P <- rbind(P, c(rep(0, i-1), -1, 2, -1, rep(0, 21-i)))
+  }
+  P <- rbind(P, c(rep(0,21), -1, 1))
+  P
+}
+
+P <- compute_P_matrix()
+y <- triceps$lntriceps
+X <- basis
+N <- nrow(triceps)
+
+
+
+optimal_λ <- function(sequence_range) {
+  lambdas <- c()
+  gcv_scores <- c()
+  for (λ in sequence_range) {
+    Beta <- ginv(t(X) %*% X + λ*P) %*% t(X) %*% y
+    yhat <- X %*% Beta
+    S <- X %*% ginv(t(X) %*% X + λ*P) %*% t(X)
+    trace_S <- sum(diag(S))
+    GCV <- sum( ((y-yhat) / (1-(trace_S/N)) )^2 ) / N
+    lambdas <- c(lambdas, λ)
+    gcv_scores <- c(gcv_scores, GCV)
+  }
+  list(gcv_scores=gcv_scores, lambdas=lambdas)
+}
+
+
+res <- optimal_λ(seq(0,1,length.out = 100))
+
+
+print(paste('minimum GCV achieved at  λ=', res$lambdas[which(res$gcv_scores==min(res$gcv_scores))]))
+plot(x = res$lambdas, y=res$gcv_scores, main='GCV scores', ylab='GCV', xlab='λ', col='#5b7bd6', frame=F)
+lines(res$gcv_scores, col='#cd025c')
+```
+
+------------------
+
+### Mødel A
+
+
+Normally, the minimum GCV is taken without question, however in this specific instance, following a tiny decrease, GCV only seems to increase with $λ$. This suggests a lambda value $\lambda=.02020$ that minimizes GCV, which is extremely small. As such the fitted curve is almost identical to the unpenalized model. On visual expection it does not appear to be an optimal model. Here we fit the suggest  $\lambda=.02020$ model, Denote this model: Model A:
+
+
+```{r, warnings=F, error=F, echo=FALSE}
+
+fit_model <- function(λ) {
+  Beta <- ginv(t(X) %*% X + λ*P) %*% t(X) %*% y
+  yhat <- X %*% Beta
+  yhat
+}
+
+l <- res$lambdas[which(res$gcv_scores==min(res$gcv_scores))]
+yhat <- fit_model(l)
+
+plot_spline(y=triceps$lntriceps, yhat=yhat, c2='#ff82ab', '#aeeeee', 'Mødel A', l)
+
+```
+
+Again, on visual inspection, this model appears subpar. If we again examine the GCV scores over various $\lambda$ values, it's readily apparent that although GCV increases with $\lambda$ it increases as such an insignificant rate that it may be plausable to consider all GCV scores within a range equivalent. If we examine GCV scores over a wider range:
+
+$$ \lambda \in \{1:100 \}$$
+We observe that GCV scores remains relatively flat until $K \approx 10$.
+------------------
+
+### Mødel B & C
+Lets consider this Model C ($lambda=10$) & compare the two models.
+
+```{r, warnings=F, error=F, echo=FALSE}
+
+res <- optimal_λ(seq(0,100))
+
+plot(res$lambdas, res$gcv_scores, main='GCV Scores', ylab='GCV', xlab='λ', col='darkred', frame=F, log='x')
+lines(res$lambdas, res$gcv_scores, col='darkred',  log='x')
+```
+
+
+Note: $\lambda$ is on log-scale so the increase in GCV as a function of $\lambda$ is actually $\approx$ linear, however $10$ appears to be a good enough selection point for a change in GCV.
+
+## Model Comparison
+
+For good measure lets include a third model inbetween the other two. Thus we'll compare $3$ models:
+  - Model A: $lambda=0.020202$
+  - Model B: $lambda=4$
+  - Model C: $lambda=10$
+  
+Lets compare the three models with a few metrics, starting off by simple visualing them. 
+
+```{r, warnings=F, error=F, echo=FALSE}
+library(gridExtra)
+
+yhat_A <- fit_model(0.020202)
+yhat_B <- fit_model(4)
+yhat_C <- fit_model(10)
+
+
+plot1 <- plot_spline(y=triceps$lntriceps, yhat=yhat_A, c1='#b0e0e6', '#0a0082', 'Mødel A', 0.020202)
+plot2 <- plot_spline(y=triceps$lntriceps, yhat=yhat_B, c1='#b0e0e6', '#0a0082', 'Mødel B', 4)
+plot3 <- plot_spline(y=triceps$lntriceps, yhat=yhat_C, c1='#b0e0e6', '#0a0082', 'Mødel C', 10)
+
+
+grid.arrange(plot1, plot2, plot3, nrow=2)
+```
+
+
+Model $B$ & $C$ appear very similar. Model $A$ - which is virtually unpenalized - appears to overfit the data.
+ 
+ 
+Now lets compare models via a numerical approach.
+
+
+
+### Metrics
+$3$ metrics are used to compare models:
+  a. Examination of Normality Assumption of Errors
+  b. AIC
+  c. BIC
+
+
+
+#### Assumption of Normality 
+
+Residuals are plotted against theoretical qq plot to assess normality visually. If residuals deviates substantially from normally distributed around $0$ this may indicate poor fit as there are strong signals ignored by the model.
+
+
+
+#### AIC and BIC
+
+
+AIC & BICa are relative metrics inwhich lower values are favourable. Given that $k = effective \text{ } no. \text{ } parameters$
+
+
+### Effective no. Parameters
+
+Since we are dealing with GAMS we need to use the effective number of parameters (a funtion of penalization) for $K$. We define this as:
+
+$$Trace(S)$$
+
+Where:
+
+$$S = X(X'X + \lambda P)^{-1}X'$$
+ 
+$$AIC = -2 log(L) + kn$$
+
+
+$$ BIC = -2 log(L)  + k \times log(n)$$
+
+
+In order to compute AIC & BIC 
+
+ - Compute variance of error term $\sigma^2$
+ - Compute log-likelihood of the model
+ - Calculate AIC, BIC
+ 
+
+
+The Log-Likelihood of a normal distribution is given by
+
+
+![](/Users/zachwolpe/Desktop/MSc Advanced Analytics/Advanced Regression/Assignments/AR Assignment 1/final implementation/Images/normal_log_likelihood.png) 
+
+
+Below we compute the AIC, BIC, effective number of parameters & the residuals normal qq plot:
+
+```{r, warnings=F, error=F, echo=FALSE}
+
+# --- store model results ----x
+
+fit_model_res <- function(λ) {
+  Beta <- ginv(t(X) %*% X + λ*P) %*% t(X) %*% y
+  yhat <- X %*% Beta
+  S <- X %*%  ginv(t(X) %*% X + λ*P) %*% t(X)
+  list(yhat=yhat, beta=Beta, y=y, X=X, λ=λ, P=P, S=S)
+}
+
+
+
+# --- compute matrix ----x
+compute_metrics <- function(res) {
+  err <- res$y - res$yhat
+  
+  qqnorm(err, pch = 1, frame = FALSE, main=paste('λ:',res$λ,'  Normal Q-Q Plot of Errors', sep=''))
+  qqline(err, col = "steelblue", lwd = 2)
+  
+  n <- length(err)
+  k <- length(res$beta)
+  K <- sum(diag(res$S))
+  
+  sig2 <- var(err)
+  
+  
+  # log likelihood
+  log_like <- -n/2*log(2*pi) -n/2*log(sig2) - 1/(2*sig2)*sum(err)^2
+  
+  
+  # metrics
+  AIC <- -2*log_like + k*n
+  BIC <- -2*log_like + k*log(n)
+  
+  list(AIC=AIC, BIC=BIC)
+}
+
+
+
+
+results <- c()
+results$a <- fit_model_res(0.020202)
+results$b <- fit_model_res(4)
+results$c <- fit_model_res(10)
+
+print(paste('Mødel A Effect Df:', sum(diag(results$a$S))))
+print(paste('Mødel B Effect Df:', sum(diag(results$b$S))))
+print(paste('Mødel C Effect Df:', sum(diag(results$c$S))))
+
+
+model_names <- c('λ=0.020202', 'λ=4', 'λ=10')
+store <- data.frame() 
+
+for (i in 1:length(results)) {
+  res <- compute_metrics(res=results[[i]])
+  store <- rbind(store, c(model_names[i], res$AIC, 'AIC'))
+  store <- rbind(store, c(model_names[i], res$BIC, 'BIC'))
+}
+
+names(store) <- c('model', 'value', 'group')
+store$value <- as.numeric(store$value)
+
+
+barplot(store$value, main='Model Comparison',
+        col=c('#aeeeee', '#ff82ab'), 
+        legend = store$group, beside=T,
+        names.arg=c('mødel A', '', 'mødel B', '', 'mødel C', ''))
+
+
+
+print((spread(store, key=group, value = value)))
+
+
+```
+
+
+
+## Model Conclusion
+
+### Residuals
+
+All of the models exhibit similar residuals diagnostics. In each model the residuals deviating from the assumption of normality to some degree, this is probabily a consequence of the nonlinear nature of the data. The results are so similar that it offers no grounds on which to distringuish the models.
+
+### Effective number of Parameters
+
+The effective number of parameters warrents consideration as simpler models are preferred. This is simply a function of the severity of penalization.
+
+
+### BIC & AIC
+
+BIC & AIC are virtually indistinguishable across the three models & over no base for comparison. 
+
+
+### Selection
+
+The models appear to perform similarly across metrics. Whilst model A boasts the smallest GCV (approxoimate LOOCV) it is only marginally smaller than the alternatives & the alternatives offer simpler, smoother fits. Model A's lack of penalization also results in it's fit becoming serverely volatile near the ends of the range of the dependent variable (a consequence of small samples sets near the extremes) making it unrealiable for extremely young or old individuals.
+
+For these reasons - & the principle of parsimonious models - Model B or C should be selected.
+
+Model B & C are virtually identical but model C is simpler (more penalized) & should be selected.
+
+
+

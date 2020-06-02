@@ -1,0 +1,369 @@
+---
+title: 'Question 4: Wavelets'
+output:
+  html_document:
+    df_print: paged
+  html_notebook: default
+  pdf_document: default
+---
+
+# Advanced Regression Assignment A
+
+##### Zach Wolpe                                 
+##### WLPZAC001
+_01 June 2020_
+
+------------------
+
+
+# Assignment Question 4
+
+Consider the HeavySine Function and add noise to the signal with a signal to Noise Ratio:
+
+$$rsnr = \frac{sd(f)}{\sigma}$$
+
+```{r, echo=F, warning=F, error=F}
+library(tidyverse)
+library(wavethresh)
+library(visreg) 
+library(splines) 
+library(mgcv)
+
+
+## Heavisine
+## matlab code MakeSignal.m Wavelab
+t <- seq(0, 1, length = 1024) 
+sig = 4*sin(4*pi*t)
+sig = sig - sign(t - .3) - sign(.72 - t) 
+
+
+data.frame(sig=sig, time=t) %>%
+  ggplot(aes(x=time, y=sig)) + geom_line( color='#d16c6a') + theme_minimal() +
+  ggtitle('HeavySine Function') +
+  theme(plot.title = element_text(hjust=.5))
+
+
+rsnr = 3
+sdnoise = sd(sig)/rsnr
+epsilon= rnorm(length(sig)) * sdnoise
+fvalnoisy = sig + epsilon # signal + noise
+y <- fvalnoisy
+N <- length(y)
+
+data.frame(sig=fvalnoisy, time=t) %>%
+  ggplot(aes(x=time, y=sig)) + geom_line( color='#79cdcd') + theme_minimal() +
+  ggtitle('HeavySine Function with Noise') +
+  theme(plot.title = element_text(hjust=.5))
+```
+
+---------------
+
+## Spline
+
+If we fit a Spline as a linear model with a B-Spline basis to the data it is evident that the fit captures the overall trend well, however it completely neglects the two _sharp edges_ that are known to exist in the true function.
+
+
+Here a B-Spline basis is generated over the range of $x=time$ with $6$ evenly spaced knots. Penalization is not warrented as a smooth, realistic yet well fitting line is achieved without penalization - the model does not appear to overfit to the data.
+
+For good measure, a $P-Spline$ is fit to the data (with the _gam()_ and _s()_ functions from the _mgcv_ r package) to confirm that no additional benefits are achieved by penalizing the spline. The fits are indistinguishable & as such the penalty is unwarrented.
+
+
+```{r, echo=F, warning=F, error=F}
+
+data <- data.frame(sig=fvalnoisy, true_sig=sig, time=t)
+
+x <- t
+knots <- seq(range(x)[1], range(x)[2], length.out = 6)
+basis <- bs(x, knots=knots)
+model <- lm(data$sig~basis)
+yhat <- predict(model)
+
+data %>%
+  ggplot(aes(x=time, y=sig)) + geom_point( color='#ff99cc', alpha=0.7) + theme_minimal() +
+  ggtitle('Spline: B-Spline Basis') +
+  ylab('signal') + 
+  geom_line(aes(x=data$time, y=yhat), col='black', size=0.8) + 
+  theme(plot.title = element_text(hjust=.5))
+
+
+gm <- gam(sig~s(t, bs='ps'), data=data)
+visreg(gm, main='P-Spline fit (penalized B-Spline)', ylab='signal', xlab='time')
+```
+
+--------------------
+
+## Wavelet Basis Selection
+
+We now fit various wavelet techniques & compare each technique in order to select a wavelet for the combined implementation. The Wavelet should capture sharp/aggressive movement in the signal. 
+
+Each of the $9$ Daubechies’ extremal phase wavelets, are tested & visually examined - we want to select a wavelet function that captures the sharp edge movement in the known function. Of course in reality these sharp edges are unknown so the decision should be made when contrasted with the noisy data.
+
+
+Visually none of the $9$ options stand out as significantly superior than the others. The Haar basis function seems to fit the data appropriately (in that it captures sharp movements) given it's discrete nature and is favourited for its simplicity. 
+
+The HAAR Wavelet with thus be considered further.
+
+Note: these Wavelets were fit using _wavethresh_ package to fit each of the $9$ as it is purely for EDA purposes.
+
+```{r, echo=F, warning=F, error=F}
+data <- data.frame(sig=fvalnoisy, true_sig=sig, time=t)
+
+view_wavelet <- function(filter_number, value=0, true_sig=T) {
+  wave.t <- wd(data$sig, filter.number=filter_number, family = "DaubExPhase")
+  w.thresh <- threshold(wave.t, value=value, policy = 'manual') 
+  wr2 <- wr(w.thresh)
+  
+  plot_data <- data$sig
+  plot_width <- 0.3
+  plot_col <- '#87c095'
+  if (!true_sig) {
+    plot_data <- data$true_sig
+    plot_width <- 2
+    plot_col <- 'darkred'
+  }
+  
+  plot.ts(wr2, main=paste('filter number', filter_number), col='darkblue', lwd=2)
+  lines(plot_data, col=plot_col, lwd=plot_width)
+}
+
+
+par(mfrow = c(3, 3), mar = c(4, 4, 1, 0)) 
+for (i in 1:9) view_wavelet(filter_number=i, value=2)
+
+
+par(mfrow = c(1,2), mar = c(4, 4, 1, 0)) 
+view_wavelet(filter_number=1, value=2.5)
+
+view_wavelet(filter_number=1, value = 2.5, true_sig=F)
+
+```
+
+
+-------------------
+
+
+## Define Model
+
+Now that we have selected our core functions:
+  - B-Spline Basis 
+  - HAAR Wavelet
+  
+We can implement the solution. The spline captures the majority trend very well however in the event that the signal exhibits sharp changes they should be detected & incorporated in the predictive function. As such the spline should be fit with the wavelet & the majority of sharp movements should be ignored (fall under the wavelet threshold) however if the movement is significantly large the wavelet should not filter it out.
+
+
+Again, it will not be neccessary to penalize spline as it fits the data in a natural, smooth, mannor without penalization.
+
+
+
+# Complete Model
+
+## First Principles
+
+Specify a model that incorporates both wavelet & B-Spline basis functions.
+
+ - BSpline basis for the spline (with an intercept)
+ - Haar basis for the wavelet
+ 
+ 
+ The model takes the structural form of a GAM. One can consider the model to simply be a BSpline basis fit as a linear model, with an added sparse covariate defined by the wavelet. Sparse in that the majority of the wavelet terms fall to zero, however in the case of major violent movements in the signal the wavelet will influence that section of the learnt function. 
+ 
+ Taken from [1] we can specify the model as:
+ 
+![](/Users/zachwolpe/Desktop/MSc Advanced Analytics/Advanced Regression/Assignments/AR Assignment 1/final implementation/Images/wavelet_functional_form.png)
+ 
+Where:
+ - $\hat{f}_H(x) = model$
+ - $\hat{f}_{LP}(x) = local \text{ } polynomial  \text{ } (spline) \text{ } function$
+ - $\hat{f}_{W}(x) = wavelet  \text{ } function$
+ 
+
+To learn the appropriate function we want to wavelet to capture parts of the function that we fail to capture with the local polynomial model. It is intuitive to think of this in terms of residuals ($e = y - \hat{y}$) in our case $e = y - \hat{f}_{LP}(x)$. If errors are large (relative to other errors) at any specific part of the function to means we are not capturing the movement adequately. As such the wavelet is fit to the errors/residuals to model these _omitted sharp movements_. The model is trained by the following algorithm (adapted from [1]):
+
+![](/Users/zachwolpe/Desktop/MSc Advanced Analytics/Advanced Regression/Assignments/AR Assignment 1/final implementation/Images/wavelet_fit_algorithm.png)
+ 
+ 
+Which fits data to a BSpline & the wavelet to the residuals, repeatedly until the aggregated model does not change much between iterations (convergence is reached).
+ 
+Individual $\hat{f}_{LP}(x)$ terms are simply fit using by a linear model using BSpline basis. 
+ 
+The Wavelet is fit to the residuales by:
+  1. $W = basis$: Generating a full rank basis matrix using the HAAR basis $W$
+  2. $y^* = W'e$: Computer $y^*$ by transposing the basis times the errors
+  3. $\lambda = stderr(e) * \sqrt{2log(N)}$: Computing the smoothing parameter $\lambda$
+  4. $\theta = sin(y^*)(|y^*|-\lambda)_+$: Computing a sparse matrix of parameter coefficients 
+  5. $\hat{f}_{W}(e) = W\theta$: Fitting the model
+ 
+ 
+ 
+
+ 
+ 
+### PLS Penalized Least Squares
+
+These parameter estimates $\theta = sin(y^*)(|y^*|-\lambda)_+$ are the solution to minimizing the penalized least squares equation: 
+
+$$min_{\theta} = ||y - W\theta||_2^2 + 2\lambda||\theta||$$
+ 
+ 
+
+## Model tuning
+ 
+Although the paper [1] suggests an iterative approach to fitting the predictive function, I found this to be unnecessary & the model can be fit well with a single iteration. 
+
+The only hyper-parameter left to optimize is the $\lambda$ smoothing value. Because the desired result is achieved by implementing the universal threshold:
+
+ $$\lambda = \sigma \sqrt{2 log N}$$
+I consider it unneccessary to try other threshold configurations.
+
+Although he universal threshold does a great job of filtering out small errors & modeling larger deviations in errors, empirically it appears to diminish the value of $\theta$ substantionally. To achieve better results, I implemented a slight deviation of this model specification. 
+
+The same (universal) threshold is used to set parameters to $0$ below the threshold, however to increase the magnitude of the remaining positive parameters I square the second multiplicative term when computing $\theta$, essentially computing parameter estimates by:
+
+$$\theta = sin(y^*)[(|y^*|-\lambda)_+]^2$$
+
+I'll refer to this altered $\theta$ as $ø$
+
+Both the original & my variant are fitted & visualized.
+
+
+```{r, echo=F, warning=F, error=F}
+library('splines') 
+library(wavethresh)
+
+
+# ---- visualization tool ------------------------- x
+plot_fit <- function(yhat, y=fvalnoisy, x=t, title='fit', c1='steelblue', c2='darkred', true_line=F) {
+  if (true_line) y <- sig
+    
+  data.frame(sig=y, time=x, yhat=yhat) %>%
+  ggplot(aes(x=time, y=sig)) + geom_line( color=c1, alpha=0.7) + theme_minimal() +
+  geom_line(aes(x=time, y=yhat), colour=c2) + ylab('') + 
+  ggtitle(title) +
+  theme(plot.title = element_text(hjust=.5))
+}
+
+
+
+
+# ---- fit lp regression ------------------------- x 
+fit_local_polynomial <- function(y,x) {
+  x <- t
+  knots <- seq(range(x)[1], range(x)[2], length.out = 8)
+  basis <- bs(x, knots=knots)
+  model <- lm(y~basis)
+  predict(model)
+  
+}
+
+
+# ---- fit wavelet ------------------------- x 
+fit_wavelet <- function(e, by_2=1) {
+  W <- GenW(n=N, filter.number=1, family = 'DaubExPhase')
+  y_star <- t(W) %*% e
+  lambda <- sd(e) * sqrt(2*log(N))
+  v <- (abs(y_star) - lambda)
+  v[v<0] <- 0
+  theta <- (sin(y_star)*2*v)*by_2
+  W %*% theta
+}
+
+
+
+# ---- Backfitting adaptation ------------------------- x 
+spline_wavelet_smoothing <- function(by_2) {
+  for (j in 1:100) {
+    f_lp <- fit_local_polynomial(y,x)
+    e <- y-f_lp
+    f_w <- fit_wavelet(e, by_2=by_2)
+    f_h <- f_lp + f_w
+
+    
+    if (j==1) f_h_old <- f_h
+    if (j>1) {
+     if (max(f_h - f_h_old) < 0.000000001) break
+    }
+    f_h_old <- f_h
+  }
+list(f_h=f_h, f_lp=f_lp, f_w=f_w)
+}
+
+
+
+
+# ---- Fit by θ ----x
+res <- spline_wavelet_smoothing(by_2=1)
+plot_fit(yhat = res$f_h,  title = 'Model θ', c1='#d59aea')
+plot_fit(yhat = res$f_h, true_line = T, title = 'True Curve θ')
+
+
+
+# ---- Fit by ø ----x
+f_h <- spline_wavelet_smoothing(by_2=2)
+plot_fit(yhat = res$f_h,  title = 'Model ø', c1='#aeeeee')
+plot_fit(yhat = res$f_h, true_line = T, title = 'True Curve ø')
+
+
+```
+
+
+
+The only difference between the models is the magnitude of the 'jumps'. Both capture the true known structure of the data - deviating substantially at the know edges - & thus model the data successfully.
+
+
+
+----------------
+
+## Model Diagnostics
+
+Given the final fit ø model, here are some model diagnostics.
+
+
+```{r, echo=F, warning=F, error=F}
+library(ggpubr)
+
+par(mfrow=c(2,1))
+# ---- errors ---- x
+err <- y - res$f_h
+plot.ts(err, main='residuals', ylab='err')
+abline(h=mean(err), col='red', lw=2)
+plot(err, main='residuals')
+abline(h=mean(err), col='red', lw=2)
+
+# ---- qq-plot ---- x
+ggqqplot(err, main='Normality of Errors')
+
+
+
+par(mfrow=c(3,1))
+# ---- wavelet ---- x 
+plot.ts(res$f_w, main='Fw(x) = Wavelet', frame=F, ylab='Signal', col='darkblue')
+
+# ---- spline ---- x 
+plot.ts(res$f_lp, main='Flp(x) = Spline', frame=F, ylab='Signal', col='darkblue')
+
+# ---- combined ---- x 
+plot.ts(res$f_h, main='Fh(x) = Spline + Wavelet', frame=F, ylab='Signal', col='#cd025c')
+
+
+```
+
+
+
+
+### Normality of Residuals
+
+The residuals are approximately normally distributed - fitting tightly on the normal qq-plot as well as being randomly scattered around $0$ with a $\bar{e} \approx 0$ - however there is a clear 'bumb' in the residuals where the wavelet is activated. This is expected given that the wavelet is almost always set to $0$ but is modeled on the residuals when activated.
+
+### Model constituients 
+
+Examining the individual fits (spline & wavelet) allows one to truly note where the wavelet takes effect on the final model. 
+
+
+------------
+
+#### References
+
+1. Oh, Hee-Seok & Lee, Thomas. (2005). Hybrid local polynomial wavelet shrinkage: Wavelet regression with automatic boundary adjustment. Computational Statistics & Data Analysis. 48. 809-819. 10.1016/j.csda.2004.04.002. 
+
+
+

@@ -1,0 +1,346 @@
+---
+title: "Question 5: Functional Data Analysis"
+output: html_document
+---
+
+
+# Advanced Regression Assignment A
+
+##### Zach Wolpe                                 
+##### WLPZAC001
+_01 June 2020_
+
+------------------
+
+
+# Functional Data Analysis
+
+We want to model average annual rainfall as a function of SOI. Resulting in a _scalar-to-function_ functional regression model.
+
+
+$$\begin{equation} 
+\begin{split}
+Y & = X\beta + e  \\
+Y & = XB\alpha + e  \\
+
+\end{split}
+\end{equation}$$
+
+In the original, standard regression, model $Y = X\beta + e$, $(p+1)=(365+1) >> n=29$ ($n$ years & $p$ observations per year). By respecifying the model we can simply learn a smooth function using basis functions. 
+- $B$ is a matrix thats columns are the Basis functions 
+ - $\alpha$ is the learnt parameter estimates. 
+ 
+ We then estimate the original equations parameters by $\hat{\beta} = B\hat{\alpha}$.
+
+
+Varying the degrees of freedom/number of basis functions allows the model to better fit the data. $13$ maybe be a logical theoretical choice, to allow for an intercept & $1$ basis 'per month'. Trade-offs between fit vs smooth should be scrutinized.
+
+Dimensionality:
+
+$$\begin{equation} 
+\begin{split}
+Y & = X\beta + e  \\
+\underset{n \times 1}{Y} & = \underset{n \times (p+1)}{X} \times   \underset{(p+1) \times 1}{\beta}  + \underset{n \times 1}{e} \\
+\underset{n \times 1}{Y} & = \underset{n \times (p+1)}{X} \times   \underset{(p+1) \times df}{B} \times \underset{df \times 1}{\alpha}  + \underset{n \times 1}{e} \\
+
+
+\end{split}
+\end{equation}$$
+
+
+where:
+$Y = \text{average rainfall}$
+$X = SOI $
+
+
+----------
+
+
+## Visualize the Data
+
+First lets visualize the raw data.
+
+```{r, echo=F, warning=F, error=F}
+library(tidyverse)
+library(dplyr)
+library(rmarkdown)
+SOI <- read.table('/Users/zachwolpe/Desktop/MSc Advanced Analytics/Advanced Regression/Assignments/AR Assignment 1/final implementation/Datasets/DailySOI1887-1989Base.txt', header=T)
+bloem <- read.csv('/Users/zachwolpe/Desktop/MSc Advanced Analytics/Advanced Regression/Assignments/AR Assignment 1/final implementation/Datasets/bloem_monthly_rain.csv')
+
+
+# ---- create dataeset ----x 
+
+# possibly add summer filter:   %>% filter(month==c(11,12,1,2))
+rainfall <- bloem %>% group_by(year)  %>% summarise(summer_rain = sum(monthlyrain)) %>% 
+  mutate(Year=year) %>% dplyr::select(summer_rain, Year)
+
+
+data <- merge(SOI %>%  dplyr::select(Year, SOI, Day), rainfall, by='Year')
+
+
+# ---- visualize data ----x
+data %>% 
+  ggplot(aes(x=Year, y=summer_rain)) +
+  geom_point(col='#ff82ab') + geom_line(col='steelblue') + theme_minimal() +
+  ggtitle('Rainfall') + ylab('rainfall') + xlab('year') + 
+  theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+Here we visualize the annual rainfall for Bloemfontein Airport over the last $30$ years. Theoretical models tell us that it might make sense to instead model summer rainfall, though this annual approach seems to offer a distinct pattern. Now lets visualized summer rainfall quantities overtime (where summer is regarded as _November, December, January, Febuary_).
+
+```{r, echo=F, warning=F, error=F}
+# possibly add summer filter:   %>% filter(month==c(11,12,1,2))
+summer_rainfall <- bloem %>% group_by(year) %>% filter(month %in% c(11,12,1,2))  %>% summarise(summer_rain = sum(monthlyrain)) %>% 
+  mutate(Year=year) %>% dplyr::select(summer_rain, Year)
+
+
+summer_data <- merge(SOI %>%  dplyr::select(Year, SOI, Day), summer_rainfall, by='Year')
+
+
+# ---- visualize data ----x
+summer_data %>% 
+  ggplot(aes(x=Year, y=summer_rain)) +
+  geom_point(col='steelblue') + geom_line(col='#ff82ab') + theme_minimal() +
+  ggtitle('Summer Rainfall') + ylab('summer rainfall') + xlab('year') + 
+  theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+
+Visually, there doesn't seem to be any reason to beleive summer rainfall is more structured. In fact it appears to exibit more variance (greater variation in rainfall across years). We will focus on annual rainfall.
+
+$$ Y = \text{Annual Rainfall in Bloemfontain} $$
+$$ X = SOI$$
+
+
+------------
+
+
+## Define the basis matrix
+
+To fit the Functional Regression model we need to create the basis functions.
+
+## Fit the model B-Splines basis. 
+
+- Define B: basis functions over the range of $X=SOI$ with degrees of freedom $df$ + an intercept basis.
+- Compute $Z$: $Z = XB$
+- Estimate $\alpha$: Fit model $Y = Z\alpha$ 
+- $\hat{\beta} = B\hat{\alpha}$ Use $\alpha$ to estimate $\beta$ 
+- Use $\hat{\beta}$ to predict the actual functional values  
+
+
+```{r, echo=F, warning=F, error=F}
+library(splines)
+
+
+# ---- reshape data ----x
+data_wide <- spread(data,key=Day, value=SOI, fill = NA)
+
+
+compute_FDA <- function(df, intercept=T, c1='darkred', c2='steelblue', plot=T) {
+  
+  if (intercept) {
+    df <- df + 1
+  }
+  
+  # ---- basis functions ----x
+  B <- bs(seq(range(data$SOI)[1], range(data$SOI)[2], length.out = 366), df=df, intercept=intercept)
+  
+  
+  # ---- Z ----x
+  X <- data.matrix(data_wide[,-c(1,2)])
+  X[is.na(X)] <- 0
+  Z <- X %*% B
+  
+  # ---- estimate alpha ----x
+  modZ <- lm(unique(data$summer_rain) ~ Z -1)
+  alpha <- coef(modZ)
+  
+  # ---- estimate Beta ----x
+  beta <- B %*% matrix(alpha)
+  
+  
+  # ---- predict true model ----x
+  yhat <- X %*% beta
+  
+  
+  # ---- results ----x
+  res <- list(X=X, Z=Z, beta=beta, y=unique(data$summer_rain), yhat=yhat)
+  
+  
+  
+  # ---- vis data ----x
+  d1 <- data[!duplicated(data$Year), c('Year','summer_rain')]
+  d1 <- cbind(d1, yhat)
+  
+  
+  title <- paste('Fitted FDA with', df, 'df without an intercept')
+  if (intercept) {
+    df <- df-1
+    title <- paste('Fitted FDA with', df, 'df with an intercept')
+  }
+  
+  fig <- d1 %>% 
+    ggplot(aes(x=Year, y=summer_rain))  +
+    geom_point(col=c1) + geom_line(col=c1) + theme_minimal() +
+   ggtitle(title) + ylab('rainfall')  + 
+     geom_point(aes(x=Year, y=yhat), col=c2) + geom_line(aes(x=Year, y=yhat), col=c2) + 
+    theme(plot.title = element_text(hjust = 0.5))
+  if (plot) print(fig)
+  
+  res
+}
+
+
+res <- compute_FDA(df=28, intercept = T)
+res <- compute_FDA(df=28, intercept = F)
+
+
+r <- compute_FDA(df=8, intercept = F, c1='#9eb4cc', c2='#cd025c')
+r <- compute_FDA(df=13, intercept = F, c1='#9eb4cc', c2='#cd025c')
+r <- compute_FDA(df=13, intercept = T, c1='#9eb4cc', c2='#cd025c')
+r <- compute_FDA(df=26, intercept = F)
+
+
+
+
+```
+
+
+We fit the model for various specifications:
+  - Varying degrees of freedom (number of basis functions)
+  - With or without allocating a basis function as a constant (intercept)
+  
+  
+As we add degrees of freedom, the function is more flexibility to fit the data. Fitting $df=28+1$ (including an intercept) perfectly interpolates the data. This is expected as $n=29$.
+
+
+------------------
+
+## Numerical Model Comparison
+
+$df=13$ ($1$ for each month without an intercept term) appears to sufficiently model the trend in the data without excessive overfitting or adding unnecessary parameters (principle of parsimonious models). $df=26$ (2 for each month) appears to fit the data very well (possibly overfit).
+
+
+For completeness here is a comparison of 4 models:
+  - model 1: $df=8$ no intercept
+  - model 2: $df=13$ no intercept
+  - model 3: $df=13$ with intercept
+  - model 4: $df=26$ no intercept
+  
+
+
+### Metrics
+$3$ metrics are used to compare models:
+  a. Examination of Normality Assumption of Errors
+  b. AIC
+  c. BIC
+
+
+
+#### Assumption of Normality 
+
+Residuals are plotted against theoretical qq plot to assess normality visually.
+
+
+
+
+
+#### AIC and BIC
+
+
+Lower AIC & BIC values are favourable. Given that $k = no. parameters$
+
+$$AIC = -2 log(L) + kn$$
+
+
+$$ BIC = -2 log(L)  + k \times log(n)$$
+
+
+In order to compute AIC & BIC 
+
+ - Compute variance of error term $\sigma^2$
+ - Compute log-likelihood of the model
+ - Calculate AIC, BIC
+ 
+
+
+The Log-Likelihood of a normal distribution is given by
+
+![](/Users/zachwolpe/Desktop/MSc Advanced Analytics/Advanced Regression/Assignments/AR Assignment 1/final implementation/Images/normal_log_likelihood.png)
+
+
+```{r, echo=F, warning=F, error=F}
+
+compute_metrics <- function(res, df, int=F) {
+  err <- res$y - res$yhat
+  
+  w <- 'without'
+  if (int) w <- 'with'
+  
+  qqnorm(err, pch = 1, frame = FALSE, main=paste('df=',df, ' (', w, ') ','Normal Q-Q Plot of Errors', sep=''))
+  qqline(err, col = "steelblue", lwd = 2)
+  
+  n <- length(err)
+  k <- length(res$beta)
+  
+  sig2 <- var(err)
+  
+  
+  # log likelihood
+  log_like <- -n/2*log(2*pi) -n/2*log(sig2) - 1/(2*sig2)*sum(err)^2
+  
+  
+  # metrics
+  AIC <- -2*log_like + k*n
+  BIC <- -2*log_like + k*log(n)
+  
+  list(AIC=AIC, BIC=BIC)
+}
+
+
+dfs <- c(8,13,13,26)
+ints <- c(F,F,T,F)
+model_names <- c('df=8', 'df=13', 'df=13_int', 'df=26')
+results <- c()
+results$a <- compute_FDA(df=8, intercept = F, plot=F)
+results$c <- compute_FDA(df=13, intercept = F, plot=F)
+results$d <- compute_FDA(df=13, intercept = T, plot=F)
+results$e <- compute_FDA(df=26, intercept = F, plot=F)
+
+
+
+store <- data.frame() 
+
+for (i in 1:length(results)) {
+  res <- compute_metrics(res=results[[i]], df=as.character(dfs[i]), int=ints[i])
+  store <- rbind(store, c(model_names[i], res$AIC, 'AIC'))
+  store <- rbind(store, c(model_names[i], res$BIC, 'BIC'))
+}
+
+names(store) <- c('model', 'value', 'group')
+store$value <- as.numeric(store$value)
+
+
+barplot(store$value, main='Model Comparison',
+        col=c('#aeeeee', '#ff82ab'), 
+        legend = store$group, beside=T,
+        names.arg=c('model 1', '', 'model 2', '', 'model 3', '', 'model 4', ''))
+
+```
+
+
+All models appear to exhibit roughly normal error terms. $df=13$ appears to exhibit an error distribution closer to approximating normality when the intercept is included.
+
+Both AIC & BIC decease as model complexity grows, despite being penalized for the increased number of parameters. The discrepencies do not, however, appear significant or large.
+
+
+Based on the visual representation of each model tested, examination of normality of errors & AIC/BIC either the model with $df=13$ or $df=26$ should be chosen - depending on the desired number of parameters. Neither fits particularly smoothly so it may make more sense to select $df=26$ to capitalize on the better fit.
+
+
+
+
+
+
+
